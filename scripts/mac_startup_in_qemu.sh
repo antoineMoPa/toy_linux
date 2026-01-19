@@ -5,7 +5,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$PROJECT_DIR/build"
 
-KERNEL="$BUILD_DIR/vmlinuz-lts"
+# Use custom kernel if available, otherwise fall back to Alpine's prebuilt
+if [[ -f "$BUILD_DIR/Image" ]]; then
+    KERNEL="$BUILD_DIR/Image"
+else
+    KERNEL="$BUILD_DIR/vmlinuz-lts"
+fi
 INITRAMFS="$BUILD_DIR/initramfs.cpio.gz"
 
 # Check if required files exist
@@ -55,10 +60,16 @@ echo ""
 # -nographic: output to terminal (no GUI window)
 # -m 512M: 512MB RAM
 # -append: kernel command line arguments
+# Shared folder: host's rootfs/ is mounted as /host in guest
+# Uses virtio-9p (virtual filesystem over virtio transport)
+SHARED_DIR="$PROJECT_DIR/rootfs"
+mkdir -p "$SHARED_DIR"
+
 $QEMU_BIN \
     $MACHINE \
     -kernel "$KERNEL" \
     -initrd "$INITRAMFS" \
     -m 512M \
     -append "console=$CONSOLE quiet" \
-    -nographic
+    -nographic \
+    -virtfs local,path="$SHARED_DIR",mount_tag=hostfs,security_model=mapped-xattr

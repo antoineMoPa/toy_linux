@@ -144,7 +144,7 @@ chmod +x "$BUSYBOX_FILE"
 # Create symlinks for common utilities
 # BusyBox uses argv[0] to determine which applet to run
 echo "      Creating BusyBox symlinks..."
-for cmd in sh ash ls cat echo mount umount mkdir rm cp mv grep find ps kill sleep; do
+for cmd in sh ash ls cat echo mount umount mkdir rm cp mv grep find ps kill sleep poweroff halt reboot; do
     ln -sf busybox "$INITRAMFS_DIR/bin/$cmd"
 done
 
@@ -179,10 +179,22 @@ mount -t proc none /proc
 mount -t sysfs none /sys
 mount -t devtmpfs none /dev
 
-echo "Mounted virtual filesystems:"
+# Mount shared folder from host (via virtio-9p)
+# The host's rootfs/ directory appears at /host in the guest
+# Edit files on macOS, see them instantly in the VM!
+mkdir -p /host
+if mount -t 9p -o trans=virtio hostfs /host 2>/dev/null; then
+    echo "Mounted /host (shared with macOS rootfs/ folder)"
+else
+    echo "Note: /host not available (no virtfs configured)"
+fi
+
+echo ""
+echo "Mounted filesystems:"
 echo "  /proc - process info (try: cat /proc/cpuinfo)"
 echo "  /sys  - hardware info (try: ls /sys/class/)"
 echo "  /dev  - device files"
+echo "  /host - shared folder (edit on macOS, see here!)"
 echo ""
 echo "Type 'busybox' to see available commands."
 echo "Type 'poweroff' to shut down."
