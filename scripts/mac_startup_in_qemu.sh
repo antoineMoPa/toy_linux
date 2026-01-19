@@ -65,6 +65,12 @@ echo ""
 SHARED_DIR="$PROJECT_DIR/rootfs"
 mkdir -p "$SHARED_DIR"
 
+# Network: user-mode (SLIRP) - easiest setup, no root needed
+# Guest gets 10.0.2.x IP via DHCP, can access internet through host
+# -netdev user: QEMU's built-in NAT/DHCP
+# -device virtio-net-device: virtual network card using virtio (fast)
+NETWORK="-netdev user,id=net0 -device virtio-net-device,netdev=net0"
+
 $QEMU_BIN \
     $MACHINE \
     -kernel "$KERNEL" \
@@ -72,4 +78,5 @@ $QEMU_BIN \
     -m 512M \
     -append "console=$CONSOLE quiet" \
     -nographic \
-    -virtfs local,path="$SHARED_DIR",mount_tag=hostfs,security_model=mapped-xattr
+    -virtfs local,path="$SHARED_DIR",mount_tag=hostfs,security_model=mapped-xattr \
+    $NETWORK

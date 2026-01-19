@@ -144,23 +144,89 @@ chmod +x "$BUSYBOX_FILE"
 # Create symlinks for common utilities
 # BusyBox uses argv[0] to determine which applet to run
 echo "      Creating BusyBox symlinks..."
-for cmd in sh ash ls cat echo mount umount mkdir rm cp mv grep find ps kill sleep poweroff halt reboot; do
+# Network utilities: ip, ifconfig, udhcpc (DHCP client), wget, ping
+# Terminal utilities: setsid, cttyhack (for proper job control)
+# Init utilities: init, getty, crond, crontab
+for cmd in sh ash ls cat echo mount umount mkdir rm cp mv grep find ps kill sleep poweroff halt reboot ip ifconfig udhcpc route wget ping hostname setsid cttyhack init getty crond crontab; do
     ln -sf busybox "$INITRAMFS_DIR/bin/$cmd"
 done
 
-# Create /init script
-# This is the first program the kernel runs (PID 1)
-echo "      Creating /init script..."
-cat > "$INITRAMFS_DIR/init" << 'INIT_SCRIPT'
+# Create udhcpc script (called by DHCP client to configure network)
+# udhcpc gets IP info from DHCP server, then calls this script with
+# environment variables like $ip, $router, $dns, etc.
+echo "      Creating DHCP client script..."
+mkdir -p "$INITRAMFS_DIR/etc"
+cat > "$INITRAMFS_DIR/etc/udhcpc.script" << 'DHCP_SCRIPT'
+#!/bin/sh
+# udhcpc script - configures interface based on DHCP response
+# Called with: $1 = action (deconfig, bound, renew, etc.)
+# Environment: $ip, $subnet, $router, $dns, $interface
+case "$1" in
+    deconfig)
+        ip addr flush dev $interface
+        ;;
+    bound|renew)
+        ip addr add $ip/${subnet:-24} dev $interface
+        if [ -n "$router" ]; then
+            ip route add default via $router
+        fi
+        if [ -n "$dns" ]; then
+            echo "nameserver $dns" > /etc/resolv.conf
+        fi
+        ;;
+esac
+DHCP_SCRIPT
+chmod +x "$INITRAMFS_DIR/etc/udhcpc.script"
+
+# Create BusyBox init system
+# ===========================
+#
+# BusyBox init is a simple init that reads /etc/inittab.
+# It handles: startup, respawning processes, shutdown signals (halt/reboot)
+#
+# /etc/inittab format:  id:runlevel:action:process
+#   id       - unique identifier (any string, often tty name)
+#   runlevel - ignored by busybox init (compatibility field)
+#   action   - sysinit, respawn, askfirst, shutdown, ctrlaltdel, etc.
+#   process  - command to run
+#
+
+echo "      Creating init system..."
+
+# /init - just a symlink to busybox init
+ln -sf /bin/busybox "$INITRAMFS_DIR/init"
+
+# /etc/inittab - tells init what to do
+mkdir -p "$INITRAMFS_DIR/etc/init.d"
+cat > "$INITRAMFS_DIR/etc/inittab" << 'INITTAB'
+# /etc/inittab - BusyBox init configuration
+#
+# Format: id:runlevel:action:process
+#
+# Actions:
+#   sysinit  - Run once at boot (wait for completion)
+#   respawn  - Run and restart if it exits
+#   askfirst - Like respawn, but prompt "Please press Enter" first
+#   shutdown - Run when shutting down
+#   ctrlaltdel - Run on Ctrl+Alt+Del
+
+# Run startup script first
+::sysinit:/etc/init.d/rcS
+
+# Start a shell on the console (respawn = restart if it exits)
+::respawn:-/bin/sh
+
+# What to do on halt/reboot
+::shutdown:/bin/echo "Shutting down..."
+::shutdown:/bin/umount -a -r
+::ctrlaltdel:/bin/reboot
+INITTAB
+
+# /etc/init.d/rcS - startup script (runs once at boot)
+cat > "$INITRAMFS_DIR/etc/init.d/rcS" << 'STARTUP'
 #!/bin/sh
 #
-# /init - First userspace program (PID 1)
-#
-# This script runs as the first process after the kernel boots.
-# If this script exits, the kernel panics. We must either:
-#   - Loop forever
-#   - exec into another program
-#   - Start a shell that keeps running
+# /etc/init.d/rcS - System startup script
 #
 
 echo "=========================================="
@@ -169,43 +235,42 @@ echo "=========================================="
 echo ""
 
 # Mount essential virtual filesystems
-# These aren't real disks - they're kernel interfaces exposed as files
-#
-# /proc - Process information (try: cat /proc/cpuinfo, ls /proc/1/)
-# /sys  - Hardware/device information (try: ls /sys/class/)
-# /dev  - Device files (console, null, random, disks, etc.)
-#
 mount -t proc none /proc
 mount -t sysfs none /sys
 mount -t devtmpfs none /dev
 
+# Create pts for proper terminal support
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts
+
 # Mount shared folder from host (via virtio-9p)
-# The host's rootfs/ directory appears at /host in the guest
-# Edit files on macOS, see them instantly in the VM!
 mkdir -p /host
 if mount -t 9p -o trans=virtio hostfs /host 2>/dev/null; then
-    echo "Mounted /host (shared with macOS rootfs/ folder)"
+    echo "[ok] Mounted /host (shared with macOS)"
 else
-    echo "Note: /host not available (no virtfs configured)"
+    echo "[--] /host not available"
 fi
 
-echo ""
-echo "Mounted filesystems:"
-echo "  /proc - process info (try: cat /proc/cpuinfo)"
-echo "  /sys  - hardware info (try: ls /sys/class/)"
-echo "  /dev  - device files"
-echo "  /host - shared folder (edit on macOS, see here!)"
-echo ""
-echo "Type 'busybox' to see available commands."
-echo "Type 'poweroff' to shut down."
-echo ""
+# Set up networking
+echo -n "[..] Configuring network... "
+ip link set eth0 up 2>/dev/null
+if udhcpc -i eth0 -s /etc/udhcpc.script -q 2>/dev/null; then
+    IP=$(ip -4 addr show eth0 | grep -o 'inet [0-9.]*' | cut -d' ' -f2)
+    echo "ok ($IP)"
+else
+    echo "failed"
+fi
 
-# Start an interactive shell
-# exec replaces this script with sh (so sh becomes PID 1)
-exec /bin/sh
-INIT_SCRIPT
+# Set hostname
+hostname toylinux
 
-chmod +x "$INITRAMFS_DIR/init"
+echo ""
+echo "Try: ping, wget, cat /proc/cpuinfo, ls /host"
+echo "Shutdown: poweroff | reboot"
+echo ""
+STARTUP
+
+chmod +x "$INITRAMFS_DIR/etc/init.d/rcS"
 
 # Create the initramfs archive
 # cpio format is required by the kernel (not tar)
