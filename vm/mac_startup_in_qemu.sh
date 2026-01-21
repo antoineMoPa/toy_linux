@@ -60,10 +60,12 @@ echo ""
 # -nographic: output to terminal (no GUI window)
 # -m 512M: 512MB RAM
 # -append: kernel command line arguments
-# Shared folder: host's rootfs/ is mounted as /host in guest
-# Uses virtio-9p (virtual filesystem over virtio transport)
+# Shared folders via virtio-9p:
+#   rootfs/ -> /host  (general file sharing)
+#   apps/   -> /apps  (package manager / installed apps)
 SHARED_DIR="$PROJECT_DIR/rootfs"
-mkdir -p "$SHARED_DIR"
+APPS_DIR="$PROJECT_DIR/apps"
+mkdir -p "$SHARED_DIR" "$APPS_DIR"
 
 # Network: user-mode (SLIRP) - easiest setup, no root needed
 # Guest gets 10.0.2.x IP via DHCP, can access internet through host
@@ -71,12 +73,30 @@ mkdir -p "$SHARED_DIR"
 # -device virtio-net-device: virtual network card using virtio (fast)
 NETWORK="-netdev user,id=net0 -device virtio-net-device,netdev=net0"
 
+# Graphics: GUI=0 for text-only, default is graphical
+GUI="${GUI:-1}"
+
+if [[ "$GUI" == "1" ]]; then
+    # virtio-gpu for display, keyboard for input
+    # Try virtio-gpu-device (MMIO) - should auto-assign to virtio-mmio transport
+    # -serial stdio: keep serial console in terminal while GUI is open
+    # -global virtio-mmio.force-legacy=false: Enable modern virtio-1 support for MMIO devices
+    #   (required for virtio-gpu which is a virtio-1-only device)
+    DISPLAY_OPTS="-global virtio-mmio.force-legacy=false -device virtio-gpu-device -display cocoa -device usb-ehci -device usb-kbd -device usb-mouse -serial stdio"
+    # Send console to both serial AND framebuffer (tty0)
+    CONSOLE_APPEND="console=$CONSOLE console=tty0"
+else
+    DISPLAY_OPTS="-nographic"
+    CONSOLE_APPEND="console=$CONSOLE"
+fi
+
 $QEMU_BIN \
     $MACHINE \
     -kernel "$KERNEL" \
     -initrd "$INITRAMFS" \
     -m 512M \
-    -append "console=$CONSOLE quiet" \
-    -nographic \
+    -append "$CONSOLE_APPEND" \
+    $DISPLAY_OPTS \
     -virtfs local,path="$SHARED_DIR",mount_tag=hostfs,security_model=mapped-xattr \
+    -virtfs local,path="$APPS_DIR",mount_tag=appsfs,security_model=mapped-xattr \
     $NETWORK

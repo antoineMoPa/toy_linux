@@ -1,8 +1,13 @@
 #!/bin/bash
 #
-# Build Linux Kernel for ARM64 using Docker
+# Build Linux Kernel for ARM64 using Docker with persistent volume
 #
-# Output: ../build/Image (ARM64 kernel)
+# Uses a Docker volume to persist build artifacts between runs.
+# This enables incremental compilation - only changed files rebuild.
+#
+# First run: ~10-15 min (full compile)
+# Config change: ~1-5 min (incremental)
+# No change: ~10 sec (nothing to do)
 #
 set -e
 
@@ -11,31 +16,54 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$PROJECT_DIR/build"
 OUTPUT="$BUILD_DIR/Image"
 
-# Skip if already built
-if [[ -f "$OUTPUT" ]]; then
-    echo "Kernel already built: $OUTPUT"
-    file "$OUTPUT"
-    exit 0
-fi
-
-echo "Building Linux Kernel (ARM64)..."
-echo "This will take 5-10 minutes on Apple Silicon."
-echo ""
+KERNEL_VERSION="6.6.70"
+VOLUME_NAME="toylinux-kernel-build"
+IMAGE_NAME="toylinux-kernel-env"
 
 mkdir -p "$BUILD_DIR"
 
-# Build the Docker image (this compiles the kernel)
-echo "[1/2] Building Docker image (compiling kernel)..."
-docker build --platform linux/arm64 -t toylinux-kernel "$SCRIPT_DIR"
+# Build the minimal Docker image (just build tools)
+echo "[1/3] Ensuring build environment..."
+docker build --platform linux/arm64 -t "$IMAGE_NAME" "$SCRIPT_DIR"
 
-# Extract the kernel from the image
-echo ""
-echo "[2/2] Extracting kernel..."
-CONTAINER_ID=$(docker create --platform linux/arm64 toylinux-kernel)
-docker cp "$CONTAINER_ID:/build/linux/arch/arm64/boot/Image" "$OUTPUT"
-docker rm "$CONTAINER_ID" > /dev/null
+# Run the build with persistent volume
+echo "[2/3] Building kernel (incremental)..."
+docker run --rm --platform linux/arm64 \
+    -v "$VOLUME_NAME:/build" \
+    -v "$SCRIPT_DIR/config.sh:/config.sh:ro" \
+    "$IMAGE_NAME" bash -c "
+        set -e
+        cd /build
+
+        # Download source if not present
+        if [[ ! -d linux ]]; then
+            echo '    Downloading kernel source...'
+            wget -q https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERSION}.tar.xz
+            tar xf linux-${KERNEL_VERSION}.tar.xz
+            mv linux-${KERNEL_VERSION} linux
+            rm linux-${KERNEL_VERSION}.tar.xz
+        fi
+
+        cd linux
+
+        # Always run config.sh
+        echo '    Configuring...'
+        bash /config.sh
+
+        # Compile (incremental - only rebuilds changed files)
+        echo '    Compiling...'
+        make -j\$(nproc) Image
+
+        echo '    Done!'
+    "
+
+# Extract the kernel
+echo "[3/3] Extracting kernel..."
+docker run --rm --platform linux/arm64 \
+    -v "$VOLUME_NAME:/build:ro" \
+    -v "$BUILD_DIR:/out" \
+    "$IMAGE_NAME" cp /build/linux/arch/arm64/boot/Image /out/Image
 
 echo ""
-echo "Done!"
-file "$OUTPUT"
+echo "Built: $OUTPUT"
 ls -lh "$OUTPUT"

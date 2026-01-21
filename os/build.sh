@@ -147,7 +147,7 @@ echo "      Creating BusyBox symlinks..."
 # Network utilities: ip, ifconfig, udhcpc (DHCP client), wget, ping
 # Terminal utilities: setsid, cttyhack (for proper job control)
 # Init utilities: init, getty, crond, crontab
-for cmd in sh ash ls cat echo mount umount mkdir rm cp mv grep find ps kill sleep poweroff halt reboot ip ifconfig udhcpc route wget ping hostname setsid cttyhack init getty crond crontab; do
+for cmd in sh ash ls cat echo mount umount mkdir rm cp mv ln grep find ps kill sleep poweroff halt reboot ip ifconfig udhcpc route wget ping hostname setsid cttyhack init getty crond crontab dmesg zcat vi less head tail chmod chown tar gzip cut basename dirname; do
     ln -sf busybox "$INITRAMFS_DIR/bin/$cmd"
 done
 
@@ -213,8 +213,18 @@ cat > "$INITRAMFS_DIR/etc/inittab" << 'INITTAB'
 # Run startup script first
 ::sysinit:/etc/init.d/rcS
 
-# Start a shell on the console (respawn = restart if it exits)
-::respawn:-/bin/sh
+# Shell on serial console (terminal)
+ttyAMA0::respawn:-/bin/sh
+
+# Shell on framebuffer console (GUI window)
+tty1::respawn:-/bin/sh
+
+# Additional virtual terminals (switch with Alt+F1-F6)
+tty2::respawn:-/bin/sh
+tty3::respawn:-/bin/sh
+tty4::respawn:-/bin/sh
+tty5::respawn:-/bin/sh
+tty6::respawn:-/bin/sh
 
 # What to do on halt/reboot
 ::shutdown:/bin/echo "Shutting down..."
@@ -243,12 +253,31 @@ mount -t devtmpfs none /dev
 mkdir -p /dev/pts
 mount -t devpts devpts /dev/pts
 
-# Mount shared folder from host (via virtio-9p)
-mkdir -p /host
+# Mount shared folders from host (via virtio-9p)
+mkdir -p /host /apps
 if mount -t 9p -o trans=virtio hostfs /host 2>/dev/null; then
-    echo "[ok] Mounted /host (shared with macOS)"
+    echo "[ok] Mounted /host (shared files)"
 else
     echo "[--] /host not available"
+fi
+if mount -t 9p -o trans=virtio appsfs /apps 2>/dev/null; then
+    echo "[ok] Mounted /apps (packages)"
+    # Add /apps/bin to PATH so installed apps are available
+    export PATH="/apps/bin:$PATH"
+
+    # Set up toolchain (dynamic linker + libs for cc1)
+    if [ -d /apps/toolchain ]; then
+        mkdir -p /lib /usr/lib
+        # Copy (not symlink) the dynamic linker since 9p symlinks don't work
+        cp /apps/toolchain/lib/ld-musl-aarch64.so.1 /lib/ld-musl-aarch64.so.1 2>/dev/null || true
+        # Copy all .so libs (mpfr, mpc, isl, gmp needed by cc1)
+        for lib in /apps/toolchain/lib/*.so*; do
+            [ -e "$lib" ] && cp "$lib" /lib/ 2>/dev/null || true
+        done
+        echo "[ok] Toolchain ready (/apps/toolchain/bin/gcc)"
+    fi
+else
+    echo "[--] /apps not available"
 fi
 
 # Set up networking
@@ -267,10 +296,27 @@ hostname toylinux
 echo ""
 echo "Try: ping, wget, cat /proc/cpuinfo, ls /host"
 echo "Shutdown: poweroff | reboot"
+echo "Switch TTY: Alt+F1 (console), Alt+F2-F6 (shells)"
 echo ""
+
+# Check for autorun command (used by vm/run.sh)
+if [ -f /apps/.autorun ]; then
+    echo "=== Running autorun command ==="
+    sh -c "$(cat /apps/.autorun)"
+    echo "=== Autorun complete, shutting down ==="
+    poweroff -f
+fi
 STARTUP
 
 chmod +x "$INITRAMFS_DIR/etc/init.d/rcS"
+
+# /etc/profile - shell environment (sourced by sh on login)
+cat > "$INITRAMFS_DIR/etc/profile" << 'PROFILE'
+# Add /apps/bin to PATH for installed packages
+export PATH="/apps/bin:/bin:/sbin"
+# Toolchain libraries (mpfr, mpc, isl, gmp needed by gcc)
+export LD_LIBRARY_PATH="/apps/toolchain/lib"
+PROFILE
 
 # Create the initramfs archive
 # cpio format is required by the kernel (not tar)
